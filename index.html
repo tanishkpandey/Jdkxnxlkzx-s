@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Calendar Sync</title>
+    <script src="https://apis.google.com/js/api.js"></script>
+    <script src="https://accounts.google.com/gsi/client"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+        margin: 0;
+        padding: 20px;
+        background: #f0f2f5;
+      }
+
+      .container {
+        max-width: 1000px;
+        margin: 0 auto;
+        background: white;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+      }
+
+      .auth-section {
+        margin-bottom: 20px;
+        padding: 20px;
+        background: #f8f9fa;
+        border-radius: 4px;
+      }
+
+      .input-section {
+        margin-bottom: 20px;
+      }
+
+      .slots-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 10px;
+        margin-top: 20px;
+      }
+
+      .slot {
+        padding: 10px;
+        background: #e3f2fd;
+        border-radius: 4px;
+        cursor: pointer;
+        text-align: center;
+        transition: all 0.3s ease;
+      }
+
+      .slot:hover {
+        background: #bbdefb;
+      }
+
+      .slot.unavailable {
+        background: #ffebee;
+        cursor: not-allowed;
+        opacity: 0.7;
+      }
+
+      button {
+        background: #1a73e8;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        margin-right: 10px;
+      }
+
+      button:hover {
+        background: #1557b0;
+      }
+
+      input,
+      select {
+        padding: 8px;
+        margin-right: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+
+      .loading {
+        display: none;
+        margin: 20px 0;
+        padding: 20px;
+        background: #fff3cd;
+        border-radius: 4px;
+        text-align: center;
+      }
+
+      #error-message {
+        color: #dc3545;
+        margin-top: 10px;
+        padding: 10px;
+        background: #f8d7da;
+        border-radius: 4px;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Calendar Sync Tool</h1>
+
+      <div class="auth-section">
+        <button id="authorize_button" style="display: none">
+          Authorize Calendar Access
+        </button>
+        <button id="signout_button" style="display: none">Sign Out</button>
+      </div>
+
+      <div class="input-section">
+        <input type="email" id="manager-email" placeholder="Manager's email" />
+        <input type="date" id="selected-date" />
+        <select id="duration">
+          <option value="30">30 minutes</option>
+          <option value="60">1 hour</option>
+        </select>
+        <button id="find-slots" disabled>Find Available Slots</button>
+      </div>
+
+      <div id="loading" class="loading">Finding available slots...</div>
+      <div id="error-message"></div>
+      <div id="available-slots" class="slots-grid"></div>
+    </div>
+
+    <script>
+      // Replace these with your Google Cloud credentials
+      const CLIENT_ID =
+        "793439664402-2tqbg19d0f1rmaqlv54lj9o3c1impek5.apps.googleusercontent.com"
+      const API_KEY = "AIzaSyDU4e9rbBoNRIZ-9A95gKcdV99NFvR5Wfg"
+      const DISCOVERY_DOC =
+        "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest"
+      const SCOPES =
+        "https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events"
+
+      let tokenClient
+      let gapiInited = false
+      let gisInited = false
+
+      // Initialization
+      function gapiLoaded() {
+        gapi.load("client", initializeGapiClient)
+      }
+
+      async function initializeGapiClient() {
+        await gapi.client.init({
+          apiKey: API_KEY,
+          discoveryDocs: [DISCOVERY_DOC],
+        })
+        gapiInited = true
+        maybeEnableButtons()
+      }
+
+      function gisLoaded() {
+        tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: SCOPES,
+          callback: "", // defined later
+        })
+        gisInited = true
+        maybeEnableButtons()
+      }
+
+      function maybeEnableButtons() {
+        if (gapiInited && gisInited) {
+          document.getElementById("authorize_button").style.display = "block"
+        }
+      }
+
+      // Authentication handlers
+      function handleAuthClick() {
+        tokenClient.callback = async (resp) => {
+          if (resp.error !== undefined) {
+            throw resp
+          }
+          document.getElementById("signout_button").style.display = "block"
+          document.getElementById("authorize_button").style.display = "none"
+          document.getElementById("find-slots").disabled = false
+        }
+
+        if (gapi.client.getToken() === null) {
+          tokenClient.requestAccessToken({ prompt: "consent" })
+        } else {
+          tokenClient.requestAccessToken({ prompt: "" })
+        }
+      }
+
+      function handleSignoutClick() {
+        const token = gapi.client.getToken()
+        if (token !== null) {
+          google.accounts.oauth2.revoke(token.access_token)
+          gapi.client.setToken("")
+          document.getElementById("authorize_button").style.display = "block"
+          document.getElementById("signout_button").style.display = "none"
+          document.getElementById("find-slots").disabled = true
+          document.getElementById("available-slots").innerHTML = ""
+        }
+      }
+
+      // Calendar operations
+      async function fetchEvents(calendarId, timeMin, timeMax) {
+        try {
+          const response = await gapi.client.calendar.events.list({
+            calendarId: calendarId,
+            timeMin: timeMin.toISOString(),
+            timeMax: timeMax.toISOString(),
+            showDeleted: false,
+            singleEvents: true,
+            orderBy: "startTime",
+          })
+          return response.result.items
+        } catch (err) {
+          showError("Error fetching calendar events: " + err.message)
+          return []
+        }
+      }
+
+      async function findAvailableSlots() {
+        const loading = document.getElementById("loading")
+        const errorMessage = document.getElementById("error-message")
+        const slotsContainer = document.getElementById("available-slots")
+
+        loading.style.display = "block"
+        errorMessage.style.display = "none"
+        slotsContainer.innerHTML = ""
+
+        try {
+          const selectedDate = document.getElementById("selected-date").value
+          const duration = parseInt(document.getElementById("duration").value)
+          const managerEmail = document.getElementById("manager-email").value
+
+          if (!selectedDate || !managerEmail) {
+            throw new Error("Please select a date and enter manager's email")
+          }
+
+          // Set up time range for selected date
+          const startTime = new Date(selectedDate)
+          startTime.setHours(9, 0, 0) // 9 AM
+          const endTime = new Date(selectedDate)
+          endTime.setHours(23, 0, 0) // 5 PM
+
+          // Fetch both calendars
+          const yourEvents = await fetchEvents("primary", startTime, endTime)
+          const managerEvents = await fetchEvents(
+            managerEmail,
+            startTime,
+            endTime
+          )
+
+          // Generate all possible slots
+          const slots = generateTimeSlots(startTime, endTime, duration)
+          console.log(slots)
+          // Check availability for each slot
+          slots.forEach((slot) => {
+            const isAvailable = checkSlotAvailability(
+              slot.start,
+              slot.end,
+              yourEvents,
+              managerEvents
+            )
+            displayTimeSlot(slot, isAvailable)
+          })
+        } catch (err) {
+          showError(err.message)
+        } finally {
+          loading.style.display = "none"
+        }
+      }
+
+      function generateTimeSlots(startTime, endTime, duration) {
+        const slots = []
+        const current = new Date(startTime)
+
+        while (current < endTime) {
+          const slotEnd = new Date(current)
+          slotEnd.setMinutes(current.getMinutes() + duration)
+
+          if (slotEnd <= endTime) {
+            slots.push({
+              start: new Date(current),
+              end: new Date(slotEnd),
+            })
+          }
+
+          current.setMinutes(current.getMinutes() + 30) // 30-minute intervals
+        }
+
+        return slots
+      }
+
+      function checkSlotAvailability(start, end, yourEvents, managerEvents) {
+        return (
+          !hasConflict(start, end, yourEvents) &&
+          !hasConflict(start, end, managerEvents)
+        )
+      }
+
+      function hasConflict(start, end, events) {
+        return events.some((event) => {
+          const eventStart = new Date(event.start.dateTime || event.start.date)
+          const eventEnd = new Date(event.end.dateTime || event.end.date)
+          return start < eventEnd && end > eventStart
+        })
+      }
+
+      function displayTimeSlot(slot, isAvailable) {
+        const slotsContainer = document.getElementById("available-slots")
+        const slotElement = document.createElement("div")
+
+        slotElement.className = `slot ${isAvailable ? "" : "unavailable"}`
+        slotElement.textContent = `${formatTime(slot.start)} - ${formatTime(
+          slot.end
+        )}`
+
+        if (isAvailable) {
+          slotElement.onclick = () => scheduleEvent(slot)
+        }
+
+        slotsContainer.appendChild(slotElement)
+      }
+
+      function formatTime(date) {
+        return date.toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        })
+      }
+
+      function showError(message) {
+        const errorElement = document.getElementById("error-message")
+        errorElement.textContent = message
+        errorElement.style.display = "block"
+      }
+
+      // Event listeners
+      document
+        .getElementById("authorize_button")
+        .addEventListener("click", handleAuthClick)
+      document
+        .getElementById("signout_button")
+        .addEventListener("click", handleSignoutClick)
+      document
+        .getElementById("find-slots")
+        .addEventListener("click", findAvailableSlots)
+
+      // Initialize the application
+      gapiLoaded()
+      gisLoaded()
+    </script>
+  </body>
+</html>
