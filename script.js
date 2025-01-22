@@ -175,3 +175,6 @@ function displayError(message) {
 }
 
 window.addEventListener("DOMContentLoaded", loadGapi); // Initialize GAPI when DOM is loaded
+
+// https://docs.google.com/spreadsheets/d/1TOTEThiRKZICmUKwqnBHHmJdR5EgzE_xBxLDMxCjBxg/edit?usp=sharing
+
